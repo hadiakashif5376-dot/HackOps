@@ -230,16 +230,30 @@ def safe_json(data: Any) -> str:
 
 
 def validate_participants(participants: List[Dict]) -> None:
-    """Validate participant input requirements."""
+    """
+    Validate participant input requirements for a multi-project hackathon.
+
+    Rules:
+    - At least four participants overall (1 leader + 3 members minimum).
+    - Every participant needs a name, and a bio or GitHub URL.
+    - Names must be unique.
+    - There can be MULTIPLE leaders — each running their own project — but
+      every leader must supply a project idea.
+    - There must be at least 3 members overall (a shared pool that leaders'
+      teams are matched from).
+    """
     if len(participants) < 4:
-        raise ValueError("At least four participants are required.")
+        raise ValueError("At least four participants are required (1 Leader + 3 Members).")
 
     names = set()
+    leader_count = 0
+    member_count = 0
 
     for participant in participants:
         name = str(participant.get("name", "")).strip()
         bio = str(participant.get("bio", "")).strip()
         github = str(participant.get("github", "")).strip()
+        role = str(participant.get("role", "member")).strip().lower()
 
         if not name:
             raise ValueError("Every participant needs a name.")
@@ -249,5 +263,17 @@ def validate_participants(participants: List[Dict]) -> None:
 
         if name.lower() in names:
             raise ValueError(f"Duplicate participant name: {name}.")
-
         names.add(name.lower())
+
+        if role == "leader":
+            leader_count += 1
+            if not str(participant.get("project_idea", "")).strip():
+                raise ValueError(f"{name} is marked as a Leader but has no project idea.")
+        else:
+            member_count += 1
+
+    if leader_count < 1:
+        raise ValueError("At least one participant must be a Leader with a project idea.")
+
+    if member_count < 3:
+        raise ValueError("At least three Members are needed to form a team alongside a Leader.")
