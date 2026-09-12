@@ -1,8 +1,7 @@
-import ast
 import json
 import os
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Callable, Any
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -24,96 +23,70 @@ def get_groq_client() -> Groq:
     return Groq(api_key=key)
 
 
-def _clean_model_text(text: str) -> str:
-    """Remove common markdown wrappers around an AI response."""
-    cleaned = (text or "").strip()
-
-    # Remove markdown code fences.
-    cleaned = re.sub(
-        r"^```(?:json|JSON)?\s*",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(r"\s*```$",
-                     "",
-                     cleaned)
-
-    # If the model added text before/after the JSON, isolate the outer object.
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-
-    if start != -1 and end > start:
-        cleaned = cleaned[start : end + 1]
-
-    return cleaned.strip()
-
-
-def _repair_json(text: str) -> str:
-    """
-    Repair a few common LLM JSON mistakes.
-
-    This is a safety net only. The first parser always tries normal JSON.
-    """
-    repaired = text.strip()
-
-    # Remove trailing commas before } or ].
-    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-
-    # Quote simple unquoted object keys:
-    # { name: "Hadia" } -> { "name": "Hadia" }
-    repaired = re.sub(
-        r'([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)\s*:',
-        r'\1"\2":',
-        repaired,
-    )
-
-    return repaired
-
-
 def extract_json_object(text: str) -> Dict:
-    """
-    Parse a JSON object returned by the model.
-
-    Normal JSON is preferred. A small repair fallback handles common
-    formatting mistakes so one bad model response does not crash HackOps.
-    """
+    """Parse a JSON object returned by the model."""
     if not text:
         raise ValueError("The AI model returned an empty response.")
 
-    cleaned = _clean_model_text(text)
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
 
-    # 1. Standard JSON.
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("The AI response did not contain a valid JSON object.")
+
+    candidate = cleaned[start : end + 1]
+
     try:
-        data = json.loads(cleaned)
-        if isinstance(data, dict):
-            return data
-    except json.JSONDecodeError as first_error:
-        json_error = first_error
-
-    # 2. Small syntax repairs.
-    repaired = _repair_json(cleaned)
-
-    try:
-        data = json.loads(repaired)
-        if isinstance(data, dict):
-            return data
+        data = json.loads(candidate)
     except json.JSONDecodeError:
-        pass
+        # First parse failed — try a couple of common auto-repairs before giving up.
+        repaired = _attempt_json_repair(candidate)
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON returned by the AI model: {exc}") from exc
 
-    # 3. Python-literal fallback.
-    # Handles cases such as {'name': 'Hadia'} or True/False/None.
-    try:
-        data = ast.literal_eval(repaired)
-        if isinstance(data, dict):
-            return data
-    except (ValueError, SyntaxError):
-        pass
+    if not isinstance(data, dict):
+        raise ValueError("The AI response must be a JSON object.")
 
-    # Return a useful error pointing to the original JSON parser problem.
-    raise ValueError(
-        f"Invalid JSON returned by the AI model: {json_error}"
-    )
+    return data
+
+
+def _attempt_json_repair(candidate: str) -> str:
+    """
+    Best-effort cleanup for near-valid JSON coming back from an LLM.
+
+    Handles the most common failure modes:
+    - trailing commas before a closing bracket/brace
+    - a response that got cut off mid-object/array (unbalanced brackets)
+    """
+    repaired = candidate
+
+    # Remove trailing commas like `"a": 1,}` or `[1, 2,]`
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+
+    # If brackets/braces are unbalanced (likely truncated output), try closing them.
+    open_curly = repaired.count("{")
+    close_curly = repaired.count("}")
+    open_square = repaired.count("[")
+    close_square = repaired.count("]")
+
+    if open_curly > close_curly or open_square > close_square:
+        # Trim any dangling partial token/value after the last complete comma or brace,
+        # then append the missing closers in a reasonable order.
+        last_good = max(repaired.rfind(","), repaired.rfind("}"), repaired.rfind("]"))
+        if last_good != -1 and last_good < len(repaired) - 1:
+            repaired = repaired[: last_good + 1]
+            repaired = re.sub(r",\s*$", "", repaired)
+
+        repaired += "]" * (open_square - repaired.count("]"))
+        repaired += "}" * (open_curly - repaired.count("}"))
+
+    return repaired
 
 
 def groq_json_completion(
@@ -121,67 +94,65 @@ def groq_json_completion(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    temperature: float = 0.0,
+    temperature: float = 0.1,
+    max_tokens: int = 8192,
+    _allow_repair_retry: bool = True,
 ) -> Dict:
     """
-    Ask Groq for a JSON object with retry protection.
+    Ask Groq for JSON using JSON Object Mode.
 
-    JSON Object Mode asks Groq for valid JSON. If a malformed response
-    nevertheless reaches the application, we retry the request with a
-    stricter instruction before failing.
+    This is more reliable than asking for plain text JSON because Groq
+    validates the response as JSON before returning it. We also:
+    - set an explicit max_tokens so large structured responses aren't
+      silently truncated by a low default cap
+    - detect truncated responses (finish_reason == "length") and raise
+      a clear error instead of a confusing JSON parse failure
+    - make one retry attempt asking the model to repair its own output
+      if the JSON still fails to parse for a non-truncation reason
     """
-    last_error = None
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+        reasoning_format="hidden",
+    )
 
-    for attempt in range(3):
-        if attempt == 0:
-            current_system = system_prompt
-        else:
-            current_system = (
-                system_prompt
-                + "\n\nCRITICAL OUTPUT RULE: "
-                  "Return ONLY one valid JSON object. "
-                  "Use double quotes around every property name and string. "
-                  "Use commas between all properties. "
-                  "Do not include markdown, comments, explanations, or trailing commas."
-            )
+    choice = response.choices[0]
+    content = choice.message.content or ""
 
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": current_system,
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt,
-                    },
-                ],
-                temperature=0,
-                response_format={"type": "json_object"},
-                reasoning_format="hidden",
-            )
+    if choice.finish_reason == "length":
+        raise ValueError(
+            "The AI response was cut off before it finished (hit the max_tokens "
+            "limit). Try increasing max_tokens or shortening the input."
+        )
 
-            content = response.choices[0].message.content or ""
-            return extract_json_object(content)
-
-        except ValueError as exc:
-            last_error = exc
-
-            # Give the model one more explicit correction instruction.
-            user_prompt = (
-                user_prompt
-                + "\n\nIMPORTANT: Your previous output could not be parsed. "
-                  "Return ONLY valid JSON. Do not use single quotes. "
-                  "Every object key must be enclosed in double quotes."
-            )
-
-        except Exception as exc:
-            # API/network errors should be surfaced immediately.
-            raise RuntimeError(f"Groq request failed: {exc}") from exc
-
-    raise ValueError(str(last_error))
+    try:
+        return extract_json_object(content)
+    except ValueError:
+        if not _allow_repair_retry:
+            raise
+        # One repair attempt: show the model its own broken output and ask
+        # it to return a corrected, valid JSON object.
+        repair_prompt = (
+            "The text below was supposed to be a single valid JSON object, "
+            "but it failed to parse. Return ONLY the corrected, valid JSON "
+            "object and nothing else (no markdown, no commentary):\n\n"
+            f"{content}"
+        )
+        return groq_json_completion(
+            client=client,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=repair_prompt,
+            temperature=0,
+            max_tokens=max_tokens,
+            _allow_repair_retry=False,
+        )
 
 
 def safe_json(data: Any) -> str:
