@@ -43,17 +43,86 @@ def extract_json_object(text: str) -> Dict:
     try:
         data = json.loads(candidate)
     except json.JSONDecodeError:
-        # First parse failed — try a couple of common auto-repairs before giving up.
-        repaired = _attempt_json_repair(candidate)
-        try:
-            data = json.loads(repaired)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON returned by the AI model: {exc}") from exc
+        data = _parse_with_repairs(candidate)
 
     if not isinstance(data, dict):
         raise ValueError("The AI response must be a JSON object.")
 
     return data
+
+
+def _parse_with_repairs(candidate: str) -> Dict:
+    """
+    Try a sequence of increasingly aggressive repairs on near-valid JSON.
+
+    Order matters: fix the safest, most common issue first (raw control
+    characters inside string values), then trailing commas / truncation,
+    then both combined. Raises ValueError with the *last* parser error if
+    nothing works.
+    """
+    attempts = []
+
+    escaped = _escape_raw_control_chars_in_strings(candidate)
+    attempts.append(escaped)
+
+    attempts.append(_attempt_json_repair(candidate))
+    attempts.append(_attempt_json_repair(escaped))
+
+    last_exc = None
+    for attempt in attempts:
+        try:
+            return json.loads(attempt)
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            continue
+
+    raise ValueError(f"Invalid JSON returned by the AI model: {last_exc}") from last_exc
+
+
+def _escape_raw_control_chars_in_strings(text: str) -> str:
+    """
+    Escape literal newline / tab / carriage-return characters that appear
+    inside JSON string literals.
+
+    LLMs frequently emit multi-line text (e.g. a "summary" or "objective"
+    field) with real line breaks instead of the escaped ``\\n`` JSON
+    requires. That produces confusing "Expecting ',' delimiter" errors deep
+    into the document, well before the response is actually truncated.
+    """
+    out = []
+    in_string = False
+    escape_next = False
+
+    for ch in text:
+        if in_string:
+            if escape_next:
+                out.append(ch)
+                escape_next = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = False
+                out.append(ch)
+                continue
+            if ch == "\n":
+                out.append("\\n")
+                continue
+            if ch == "\r":
+                out.append("\\r")
+                continue
+            if ch == "\t":
+                out.append("\\t")
+                continue
+            out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+
+    return "".join(out)
 
 
 def _attempt_json_repair(candidate: str) -> str:
