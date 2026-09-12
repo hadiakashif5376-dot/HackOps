@@ -226,30 +226,38 @@ elif st.session_state.step == 2:
     if not st.session_state.analysis_complete:
         st.markdown('<div class="card"><b>Ready to build the team?</b><br><span class="meta">This runs profile parsing, project analysis, FAISS search, team matching, balance evaluation and sprint planning.</span></div>', unsafe_allow_html=True)
         if st.button("🚀 Build HackOps Team", type="primary", use_container_width=True):
+            stage = "validating participants"
             try:
                 participants = st.session_state.participants
                 validate_participants(participants)
                 progress = st.progress(0)
                 status = st.empty()
                 status.write("1/7 Understanding participant profiles...")
+                stage = "parsing participant profiles"
                 profiles = [parse_participant(p) for p in participants]
                 progress.progress(15)
                 status.write("2/7 Analyzing project requirements...")
+                stage = "analyzing the project idea"
                 project = analyze_project(st.session_state.project_idea)
                 progress.progress(30)
                 status.write("3/7 Creating semantic profile index...")
+                stage = "building the profile search index"
                 index, indexed_profiles = build_profile_index(profiles)
                 progress.progress(45)
                 status.write("4/7 Searching for relevant candidates...")
+                stage = "searching for candidates"
                 candidates = search_candidates(index, indexed_profiles, project, top_k=min(len(indexed_profiles), 10))
                 progress.progress(60)
                 status.write("5/7 Forming complementary 4-person team...")
+                stage = "forming the team"
                 team = form_team(candidates, project, team_size=4)
                 progress.progress(75)
                 status.write("6/7 Evaluating team balance...")
+                stage = "evaluating team balance"
                 balance = evaluate_team(team, project)
                 progress.progress(88)
                 status.write("7/7 Generating 48-hour launch plan...")
+                stage = "generating the launch plan"
                 sprint = generate_sprint_plan(team, project, balance)
                 progress.progress(100)
                 st.session_state.result = {"project": project, "profiles": profiles, "candidates": candidates, "team": team, "balance": balance, "sprint": sprint}
@@ -257,7 +265,7 @@ elif st.session_state.step == 2:
                 status.success("HackOps team formation completed.")
                 st.rerun()
             except Exception as exc:
-                st.error(f"HackOps could not complete the analysis: {exc}")
+                st.error(f"HackOps could not complete the analysis while {stage}: {exc}")
     else:
         team = st.session_state.result["team"]
         st.success("Your recommended 4-person squad is ready.")
