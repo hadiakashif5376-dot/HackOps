@@ -8,177 +8,307 @@ from vector_store import build_profile_index, search_candidates
 from team_matcher import form_team
 from team_balance import evaluate_team
 from sprint_planner import generate_sprint_plan
-from utils import load_env, safe_json, validate_participants
-
-load_env()
+from utils import validate_participants
 
 st.set_page_config(page_title="HackOps", page_icon="🚀", layout="wide")
 
-st.title("🚀 HackOps")
-st.subheader("AI Hackathon Team Formation & 48-Hour Launch Engine")
-st.write("Turn messy participant profiles and a hackathon idea into a balanced 4-person team and an executable 48-hour plan.")
+st.markdown("""
+<style>
+.block-container{max-width:1180px;padding-top:2rem;padding-bottom:4rem}
+.h-title{font-size:2.1rem;font-weight:800;letter-spacing:-1px;margin-bottom:.1rem}
+.h-sub{color:#667085;margin-bottom:1.6rem}
+.stepper{display:flex;align-items:center;margin:.5rem 0 2rem}
+.step-item{display:flex;align-items:center;flex:1}
+.step-circle{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;border:1px solid #d0d5dd;background:#fff;color:#667085;flex-shrink:0}
+.step-circle.active{background:#111827;color:#fff;border-color:#111827}
+.step-circle.done{background:#12b76a;color:#fff;border-color:#12b76a}
+.step-label{margin-left:8px;font-size:.78rem;font-weight:600;color:#667085;white-space:nowrap}
+.step-label.active{color:#111827}.step-line{height:1px;background:#d0d5dd;flex:1;margin:0 10px}.step-line.done{background:#12b76a}
+.card{border:1px solid #eaecf0;border-radius:14px;padding:1rem 1.1rem;background:#fff;margin-bottom:.7rem}
+.pname{font-weight:700;font-size:1rem}.meta{color:#667085;font-size:.86rem;line-height:1.45}
+.badge{display:inline-block;padding:.25rem .6rem;border-radius:999px;background:#f2f4f7;color:#344054;font-size:.8rem;font-weight:700}
+.role{color:#475467;font-size:.88rem;font-weight:600}
+</style>
+""", unsafe_allow_html=True)
+
+
+def init_state():
+    defaults = {
+        "step": 1, "project_idea": "", "participants": [],
+        "result": None, "analysis_complete": False, "use_mock": False
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def reset_workflow():
+    st.session_state.step = 1
+    st.session_state.project_idea = ""
+    st.session_state.participants = []
+    st.session_state.result = None
+    st.session_state.analysis_complete = False
+
+
+def stepper(current):
+    steps = [("01", "PROJECT"), ("02", "PARTICIPANTS"), ("03", "MATCH"),
+             ("04", "BALANCE"), ("05", "LAUNCH")]
+    html = '<div class="stepper">'
+    for i, (num, label) in enumerate(steps, 1):
+        cls = "done" if i < current else ("active" if i == current else "")
+        txt = "✓" if i < current else num
+        lcls = "active" if i == current else ""
+        html += f'<div class="step-item"><div><div class="step-circle {cls}">{txt}</div><div class="step-label {lcls}">{label}</div></div>'
+        if i < len(steps):
+            html += f'<div class="step-line {"done" if i < current else ""}"></div>'
+        html += '</div>'
+    st.markdown(html + '</div>', unsafe_allow_html=True)
+
+
+def participant_card(i, p):
+    name = p.get("name", "Unnamed")
+    bio = p.get("bio", "") or "No bio provided"
+    github = p.get("github", "")
+    c1, c2 = st.columns([5, 1])
+    with c1:
+        link = f"<br>🔗 {github}" if github else ""
+        st.markdown(f'<div class="card"><div class="pname">👤 {name}</div><div class="meta">{bio}{link}</div></div>', unsafe_allow_html=True)
+    with c2:
+        if st.button("Remove", key=f"remove_{i}", use_container_width=True):
+            st.session_state.participants.pop(i)
+            st.rerun()
+
+
+init_state()
+
+st.markdown('<div class="h-title">🚀 HackOps</div>', unsafe_allow_html=True)
+st.markdown('<div class="h-sub">AI-powered hackathon team formation and 48-hour launch planning</div>', unsafe_allow_html=True)
+stepper(st.session_state.step)
 
 with st.sidebar:
-    st.header("Demo / Input")
-    use_mock = st.checkbox("Use built-in mock data", value=True)
-    st.caption("For a real hackathon, add 4–20 participant profiles below.")
+    st.markdown("### HackOps")
+    st.caption("Build a balanced 4-person hackathon team.")
+    mock = st.checkbox("Use built-in demo data", value=st.session_state.use_mock)
+    if mock != st.session_state.use_mock:
+        st.session_state.use_mock = mock
+        if mock:
+            st.session_state.project_idea = MOCK_PROJECT
+            st.session_state.participants = [dict(p) for p in MOCK_PARTICIPANTS]
+            st.session_state.result = None
+            st.session_state.analysis_complete = False
+            st.session_state.step = 1
+        else:
+            reset_workflow()
+    if st.button("↻ Start over", use_container_width=True):
+        reset_workflow()
+        st.rerun()
 
-if use_mock:
-    raw_participants = MOCK_PARTICIPANTS
-    project_idea = MOCK_PROJECT
-else:
-    project_idea = st.text_area(
-        "Hackathon project idea",
-        placeholder="Example: Build an AI assistant that helps students discover and apply for scholarships.",
-        height=120,
+# STEP 1
+if st.session_state.step == 1:
+    st.markdown("## 01 — Project")
+    st.write("Describe your hackathon idea. It can be rough or incomplete.")
+    st.session_state.project_idea = st.text_area(
+        "Hackathon project idea", value=st.session_state.project_idea,
+        height=170,
+        placeholder="Example: Build an AI-powered daily footstep counter that tracks walking activity and gives simple insights."
     )
-    participant_text = st.text_area(
-        "Participants",
-        placeholder="One participant per block. Example:\nName: Ali\nBio: Python developer with ML and FastAPI experience.\n\nName: Sara\nBio: React frontend developer...",
-        height=320,
-    )
-    raw_participants = []
-    blocks = [b.strip() for b in participant_text.split("\n\n") if b.strip()]
-    for i, block in enumerate(blocks, start=1):
-        lines = block.splitlines()
-        name = lines[0].replace("Name:", "").strip() if lines else f"Participant {i}"
-        bio = "\n".join(lines[1:]).replace("Bio:", "").strip() if len(lines) > 1 else block
-        raw_participants.append({"name": name, "bio": bio})
+    if st.button("Continue to participants →", type="primary", use_container_width=True):
+        if not st.session_state.project_idea.strip():
+            st.error("Please enter a project idea first.")
+        else:
+            st.session_state.step = 2
+            st.rerun()
+    st.info("💡 A messy idea is fine. HackOps will structure the requirements.")
 
-run = st.button("Build HackOps Team", type="primary", use_container_width=True)
+# STEP 2
+elif st.session_state.step == 2:
+    st.markdown("## 02 — Participants")
+    st.write("Add every hacker separately. Their details stay visible in the list below.")
+    count = len(st.session_state.participants)
+    st.markdown(f'<span class="badge">{count} / 4 minimum participants</span>', unsafe_allow_html=True)
 
-if run:
-    if not project_idea.strip():
-        st.error("Please provide a project idea.")
-        st.stop()
+    st.markdown("### Add participant")
+    with st.form("participant_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            name = st.text_input("Name *", placeholder="e.g. Hadia")
+        with c2:
+            github = st.text_input("GitHub URL (optional)", placeholder="https://github.com/username")
+        bio = st.text_area("Bio / skills *", height=120,
+                           placeholder="e.g. Frontend developer with React, JavaScript and Streamlit experience.")
+        add = st.form_submit_button("＋ Add Participant", type="primary", use_container_width=True)
 
-    if len(raw_participants) < 4:
-        st.error("HackOps needs at least 4 participants.")
-        st.stop()
-
-    try:
-        validate_participants(raw_participants)
-
-        progress = st.progress(0)
-        status = st.empty()
-
-        status.write("1/7 Parsing participant profiles...")
-        profiles = [parse_participant(p) for p in raw_participants]
-        progress.progress(15)
-
-        status.write("2/7 Analyzing project requirements...")
-        project = analyze_project(project_idea)
-        progress.progress(30)
-
-        status.write("3/7 Creating local FAISS profile index...")
-        index, metadata = build_profile_index(profiles)
-        progress.progress(45)
-
-        status.write("4/7 Retrieving relevant candidates...")
-        candidates = search_candidates(index, metadata, project, top_k=min(len(profiles), 12))
-        progress.progress(60)
-
-        status.write("5/7 Forming complementary 4-person team...")
-        team = form_team(candidates, project, team_size=4)
-        progress.progress(72)
-
-        status.write("6/7 Evaluating team coverage...")
-        balance = evaluate_team(team, project)
-        progress.progress(84)
-
-        status.write("7/7 Generating 48-hour sprint...")
-        sprint = generate_sprint_plan(team, project, balance)
-        progress.progress(100)
-        status.success("HackOps plan generated.")
-
-        st.session_state["result"] = {
-            "profiles": profiles,
-            "project": project,
-            "candidates": candidates,
-            "team": team,
-            "balance": balance,
-            "sprint": sprint,
-        }
-
-    except Exception as exc:
-        st.error(f"Could not complete the workflow: {exc}")
-        st.exception(exc)
-
-result = st.session_state.get("result")
-
-if result:
-    project = result["project"]
-    team = result["team"]
-    balance = result["balance"]
-    sprint = result["sprint"]
+    if add:
+        if not name.strip():
+            st.error("Please enter the participant's name.")
+        elif not bio.strip() and not github.strip():
+            st.error("Add a bio/skills description or a GitHub URL.")
+        else:
+            st.session_state.participants.append({"name": name.strip(), "bio": bio.strip(), "github": github.strip()})
+            st.success(f"{name.strip()} added successfully.")
+            st.rerun()
 
     st.divider()
-    st.header("01 — Project Understanding")
-    st.write(project.get("summary", ""))
-    c1, c2, c3 = st.columns(3)
-    c1.metric("MVP goal", project.get("mvp_goal", "—"))
-    c2.metric("Required roles", len(project.get("required_roles", [])))
-    c3.metric("Critical capabilities", len(project.get("critical_capabilities", [])))
+    st.markdown("### Your participants")
+    if not st.session_state.participants:
+        st.markdown('<div class="card"><b>No participants added yet.</b><br><span class="meta">Add at least 4 participants to form a team.</span></div>', unsafe_allow_html=True)
+    else:
+        for i, p in enumerate(st.session_state.participants):
+            participant_card(i, p)
 
-    with st.expander("Project requirements"):
-        st.json(project)
+    st.divider()
+    c1, _, c3 = st.columns([1, 3, 1])
+    with c1:
+        if st.button("← Back", use_container_width=True):
+            st.session_state.step = 1
+            st.rerun()
+    with c3:
+        if st.button("Continue →", type="primary", disabled=count < 4, use_container_width=True):
+            st.session_state.step = 3
+            st.rerun()
+    if count < 4:
+        n = 4 - count
+        st.warning(f"Add {n} more participant{'s' if n != 1 else ''} to continue.")
 
-    st.header("02 — Recommended 4-Person Squad")
-    cols = st.columns(4)
-    for col, member in zip(cols, team):
-        with col:
-            st.markdown(f"### {member.get('name', 'Member')}")
-            st.write(f"**Role:** {member.get('assigned_role', member.get('primary_role', '—'))}")
-            st.write(f"**Experience:** {member.get('experience_level', '—')}")
-            st.write("**Skills:** " + ", ".join(member.get("skills", [])[:6]))
-            st.caption(member.get("selection_reason", ""))
+# STEP 3
+elif st.session_state.step == 3:
+    st.markdown("## 03 — AI Match")
+    st.write("HackOps combines AI profile understanding, semantic search and complementary-role scoring.")
+    if not st.session_state.analysis_complete:
+        st.markdown('<div class="card"><b>Ready to build the team?</b><br><span class="meta">This runs profile parsing, project analysis, FAISS search, team matching, balance evaluation and sprint planning.</span></div>', unsafe_allow_html=True)
+        if st.button("🚀 Build HackOps Team", type="primary", use_container_width=True):
+            try:
+                participants = st.session_state.participants
+                validate_participants(participants)
+                progress = st.progress(0)
+                status = st.empty()
+                status.write("1/7 Understanding participant profiles...")
+                profiles = [parse_participant(p) for p in participants]
+                progress.progress(15)
+                status.write("2/7 Analyzing project requirements...")
+                project = analyze_project(st.session_state.project_idea)
+                progress.progress(30)
+                status.write("3/7 Creating semantic profile index...")
+                index, indexed_profiles = build_profile_index(profiles)
+                progress.progress(45)
+                status.write("4/7 Searching for relevant candidates...")
+                candidates = search_candidates(index, indexed_profiles, project, top_k=min(len(indexed_profiles), 10))
+                progress.progress(60)
+                status.write("5/7 Forming complementary 4-person team...")
+                team = form_team(candidates, project, team_size=4)
+                progress.progress(75)
+                status.write("6/7 Evaluating team balance...")
+                balance = evaluate_team(team, project)
+                progress.progress(88)
+                status.write("7/7 Generating 48-hour launch plan...")
+                sprint = generate_sprint_plan(team, project, balance)
+                progress.progress(100)
+                st.session_state.result = {"project": project, "profiles": profiles, "candidates": candidates, "team": team, "balance": balance, "sprint": sprint}
+                st.session_state.analysis_complete = True
+                status.success("HackOps team formation completed.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"HackOps could not complete the analysis: {exc}")
+    else:
+        team = st.session_state.result["team"]
+        st.success("Your recommended 4-person squad is ready.")
+        st.markdown("### Recommended squad")
+        for i, member in enumerate(team, 1):
+            c1, c2 = st.columns([1, 5])
+            with c1: st.markdown(f"### {i:02d}")
+            with c2:
+                name = member.get("name", "Unnamed")
+                role = member.get("assigned_role") or member.get("primary_role", "Team Member")
+                skills = member.get("skills", [])
+                reason = member.get("selection_reason", "")
+                st.markdown(f"**{name}**")
+                st.markdown(f'<div class="role">{role}</div>', unsafe_allow_html=True)
+                if skills: st.caption(" • ".join(skills[:8]))
+                if reason: st.write(reason)
+            st.divider()
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("← Change participants", use_container_width=True):
+                st.session_state.analysis_complete = False
+                st.session_state.result = None
+                st.session_state.step = 2
+                st.rerun()
+        with c2:
+            if st.button("View team balance →", type="primary", use_container_width=True):
+                st.session_state.step = 4
+                st.rerun()
 
-    st.header("03 — Team Balance")
-    score = float(balance.get("overall_score", 0))
-    st.metric("Overall Team Fit", f"{score:.0f}%")
-    st.progress(max(0, min(100, int(score))))
+# STEP 4
+elif st.session_state.step == 4:
+    st.markdown("## 04 — Team Balance")
+    st.write("Understand the team's coverage, strengths and remaining gaps.")
+    if not st.session_state.result:
+        st.warning("Build a team first.")
+        if st.button("Go to AI Match →", type="primary"): st.session_state.step = 3; st.rerun()
+    else:
+        balance = st.session_state.result["balance"]
+        overall = balance.get("overall_score", balance.get("fit_score", 0))
+        coverage = balance.get("coverage_score", 0)
+        diversity = balance.get("role_diversity_score", 0)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Overall team fit", f"{overall:.0f}/100")
+        c2.metric("Capability coverage", f"{coverage:.0f}/100")
+        c3.metric("Role diversity", f"{diversity:.0f}/100")
+        st.divider()
+        left, right = st.columns(2)
+        with left:
+            st.markdown("### ✅ Strengths")
+            for x in balance.get("strengths", []) or ["No specific strengths returned."]: st.success(str(x))
+        with right:
+            st.markdown("### ⚠️ Gaps")
+            gaps = balance.get("gaps", [])
+            if gaps:
+                for x in gaps: st.warning(str(x))
+            else: st.success("No major capability gaps detected.")
+        st.divider()
+        if st.button("Generate 48-hour launch plan →", type="primary", use_container_width=True): st.session_state.step = 5; st.rerun()
+        if st.button("← Back to match", use_container_width=True): st.session_state.step = 3; st.rerun()
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Coverage")
-        for item in balance.get("coverage", []):
-            status_icon = "✅" if item.get("covered") else "⚠️"
-            st.write(f"{status_icon} **{item.get('capability')}** — {item.get('coverage_score', 0)}%")
-    with right:
-        st.subheader("Strengths & Gaps")
-        for item in balance.get("strengths", []):
-            st.write("✅ " + item)
-        for item in balance.get("gaps", []):
-            st.write("⚠️ " + item)
-
-    with st.expander("Detailed balance JSON"):
-        st.json(balance)
-
-    st.header("04 — 48-Hour Sprint Roadmap")
-    st.write(sprint.get("overview", ""))
-
-    for phase in sprint.get("phases", []):
-        st.subheader(f"{phase.get('time_window', '')} — {phase.get('title', '')}")
-        st.write(phase.get("goal", ""))
-        for task in phase.get("tasks", []):
-            st.markdown(
-                f"- **{task.get('owner', 'Team')}** — {task.get('task', '')} "
-                f"→ `{task.get('deliverable', '')}`"
-            )
-
-    st.subheader("Milestones")
-    for milestone in sprint.get("milestones", []):
-        st.write(f"🏁 **{milestone.get('time', '')}:** {milestone.get('deliverable', '')}")
-
-    st.subheader("Demo-Day Checklist")
-    for item in sprint.get("demo_checklist", []):
-        st.checkbox(item, key="demo_" + str(abs(hash(item))))
-
-    st.subheader("Raw Structured JSON")
-    st.download_button(
-        "Download result JSON",
-        data=json.dumps(result, indent=2, ensure_ascii=False),
-        file_name="hackops_result.json",
-        mime="application/json",
-    )
-    st.code(safe_json(result), language="json")
+# STEP 5
+else:
+    st.markdown("## 05 — 48-Hour Launch")
+    st.write("Your team is formed. HackOps now turns the idea into an execution plan.")
+    if not st.session_state.result:
+        st.warning("Build and evaluate a team first.")
+    else:
+        result = st.session_state.result
+        project, sprint = result["project"], result["sprint"]
+        st.markdown("### Project")
+        st.markdown(f'<div class="card"><b>{project.get("summary", "Hackathon project")}</b><br><br><span class="meta">MVP Goal: {project.get("mvp_goal", "Not specified")}</span></div>', unsafe_allow_html=True)
+        st.markdown("### 48-hour roadmap")
+        for phase in sprint.get("phases", []) or []:
+            title = phase.get("title", phase.get("name", "Phase"))
+            timebox = phase.get("timebox", "")
+            with st.expander(f"{title}{' — ' + timebox if timebox else ''}", expanded=True):
+                if phase.get("objective"): st.markdown(f"**Objective:** {phase['objective']}")
+                for task in phase.get("tasks", []) or []:
+                    if isinstance(task, dict):
+                        text = f"- **{task.get('task', 'Task')}**"
+                        if task.get("owner"): text += f" — Owner: {task['owner']}"
+                        if task.get("deliverable"): text += f" — Deliverable: {task['deliverable']}"
+                        st.markdown(text)
+                    else: st.markdown(f"- {task}")
+        st.divider()
+        st.markdown("### Milestones")
+        for m in sprint.get("milestones", []) or []:
+            if isinstance(m, dict):
+                text = f"**{m.get('name', 'Milestone')}**"
+                if m.get("target_time"): text += f" — {m['target_time']}"
+                if m.get("deliverable"): text += f"<br><span class='meta'>{m['deliverable']}</span>"
+                st.markdown(text, unsafe_allow_html=True)
+            else: st.markdown(f"- {m}")
+        st.divider()
+        st.markdown("### 🎤 Demo-day checklist")
+        for i, item in enumerate(sprint.get("demo_checklist", []) or []): st.checkbox(str(item), key=f"demo_{i}")
+        raw = {"project": project, "team": result["team"], "balance": result["balance"], "sprint": sprint}
+        st.download_button("⬇ Download HackOps JSON", json.dumps(raw, indent=2, ensure_ascii=False), "hackops_result.json", "application/json", use_container_width=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("← Team balance", use_container_width=True): st.session_state.step = 4; st.rerun()
+        with c2:
+            if st.button("🚀 Start a new HackOps project", type="primary", use_container_width=True): reset_workflow(); st.rerun()
