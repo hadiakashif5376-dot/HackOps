@@ -1,11 +1,14 @@
 from typing import Dict
-from groq import Groq
+
 from prompts import PROFILE_PROMPT
-from utils import extract_json_object, get_groq_client
+from utils import extract_json_object, get_groq_client, groq_json_completion
+
+
+MODEL = "openai/gpt-oss-120b"
 
 
 def parse_participant(participant: Dict) -> Dict:
-    """Parse one messy participant bio into a validated structured profile."""
+    """Parse one participant bio into a structured profile."""
     name = participant.get("name", "Unknown Participant")
     bio = participant.get("bio", "")
     github = participant.get("github", "")
@@ -14,16 +17,24 @@ def parse_participant(participant: Dict) -> Dict:
         raise ValueError(f"{name} has neither a bio nor a GitHub URL.")
 
     client = get_groq_client()
-    prompt = PROFILE_PROMPT.format(name=name, bio=bio, github=github or "Not provided")
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {"role": "system", "content": "Return only valid JSON. No markdown fences."},
-            {"role": "user", "content": prompt},
-        ],
+
+    prompt = PROFILE_PROMPT.format(
+        name=name,
+        bio=bio or "Not provided",
+        github=github or "Not provided",
+    )
+
+    data = groq_json_completion(
+        client=client,
+        model=MODEL,
+        system_prompt=(
+            "You are a profile extraction system. "
+            "Return one valid JSON object matching the requested structure. "
+            "Do not use markdown."
+        ),
+        user_prompt=prompt,
         temperature=0.1,
     )
-    data = extract_json_object(response.choices[0].message.content)
 
     data["name"] = name
     data["bio"] = bio
@@ -33,4 +44,5 @@ def parse_participant(participant: Dict) -> Dict:
     data["experience_level"] = data.get("experience_level", "Intermediate")
     data["interests"] = data.get("interests", [])
     data["preferences"] = data.get("preferences", [])
+
     return data
